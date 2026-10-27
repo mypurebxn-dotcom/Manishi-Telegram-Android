@@ -1,0 +1,146 @@
+name: Manishi Telegram — branded ARM64 debug (credentials required)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manishi-branded-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  branded-debug:
+    name: Independent-brand ARM64 debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      UPSTREAM_SHA: dc780e81ed1261c369c27870e8e0999a1eb0b600
+    steps:
+      - name: Read Manishi CI scripts
+        uses: actions/checkout@v4
+
+      - name: Validate CI transformation syntax (no credentials)
+        run: python3 -m py_compile ci/prepare_manishi.py
+
+      - name: Confirm owner API credentials and persistent debug keystore
+        shell: bash
+        env:
+          MANISHI_API_ID: ${{ secrets.MANISHI_API_ID }}
+          MANISHI_API_HASH: ${{ secrets.MANISHI_API_HASH }}
+          MANISHI_DEBUG_KEYSTORE_B64: ${{ secrets.MANISHI_DEBUG_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$MANISHI_API_ID" =~ ^[1-9][0-9]{3,11}$ ]] ||
+             [[ ! "$MANISHI_API_HASH" =~ ^[a-fA-F0-9]{32}$ ]] ||
+             [[ -z "$MANISHI_DEBUG_KEYSTORE_B64" ]]; then
+            echo 'HOLD: Set MANISHI_API_ID, MANISHI_API_HASH and MANISHI_DEBUG_KEYSTORE_B64 in repository Actions secrets.' >&2
+            exit 1
+          fi
+          KEYSTORE="$RUNNER_TEMP/manishi-debug.jks"
+          printf '%s' "$MANISHI_DEBUG_KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+          chmod 600 "$KEYSTORE"
+          keytool -list -keystore "$KEYSTORE" -storepass android -alias androiddebugkey >/dev/null
+          echo "MANISHI_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+          echo 'OWN_API_AND_PERSISTENT_SIGNING=PASS'
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Use preinstalled Android SDK command-line tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${ANDROID_HOME:?Android SDK missing}"
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+
+      - name: Install declared SDK 36 / NDK 27.2 / CMake 3.22.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
+          test -f "$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake"
+          test -f "$ANDROID_HOME/platforms/android-36/android.jar"
+          test -x "$ANDROID_HOME/cmake/3.22.1/bin/cmake"
+
+      - name: Fetch exact upstream Telegram Android revision and submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init upstream
+          cd upstream
+          git remote add origin https://github.com/TelegramOrg/Telegram-Android.git
+          git -c protocol.version=2 fetch --no-tags --depth=1 origin "$UPSTREAM_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"
+          git submodule sync --recursive
+          git submodule update --init --recursive --jobs 3 --depth 1
+          if test -n "$(git submodule status --recursive | grep -E '^[-+U]' || true)"; then
+            echo 'HOLD: Submodule not at pinned commit' >&2
+            exit 1
+          fi
+
+      - name: Apply Manishi brand, package, launcher icon and private API values
+        shell: bash
+        env:
+          MANISHI_API_ID: ${{ secrets.MANISHI_API_ID }}
+          MANISHI_API_HASH: ${{ secrets.MANISHI_API_HASH }}
+        run: |
+          set -euo pipefail
+          python3 -B ci/prepare_manishi.py upstream
+
+      - name: Build independent Manishi ARM64 debug APK
+        shell: bash
+        working-directory: upstream
+        timeout-minutes: 240
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --max-workers=2 --no-parallel \
+            -Dorg.gradle.jvmargs='-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8' \
+            :TMessagesProj_App:assembleAfatDebug
+
+      - name: Verify independent package, icon resources, signature and ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t apks < <(find upstream/TMessagesProj_App/build/outputs/apk -type f -name '*.apk' -print0)
+          if [[ ${#apks[@]} -ne 1 ]]; then
+            echo "HOLD: Expected exactly one built APK, got ${#apks[@]}" >&2
+            exit 1
+          fi
+          APK="${apks[0]}"
+          unzip -tq "$APK" >/dev/null
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK" >/dev/null
+          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK" > apk-badging.txt
+          grep -F "package: name='com.manishi.telegram'" apk-badging.txt >/dev/null
+          grep -F "application-label:'Manishi Telegram'" apk-badging.txt >/dev/null
+          unzip -Z1 "$APK" | grep -q '^lib/arm64-v8a/'
+          if unzip -Z1 "$APK" | grep -E '^lib/(armeabi-v7a|x86|x86_64)/'; then
+            echo 'HOLD: Non-ARM64 native library found' >&2
+            exit 1
+          fi
+          sha256sum "$APK" > apk-sha256.txt
+          cp "$APK" manishi-telegram-arm64-debug.apk
+          {
+            echo 'APK_COMPILED_AND_SIGNED=PASS'
+            echo 'PACKAGE_ID=com.manishi.telegram'
+            echo 'APP_NAME=Manishi Telegram'
+            echo 'FIREBASE_PUSH=NOT_CONFIGURED'
+            echo 'APP=EXPERIMENTAL_NOT_RELEASE_READY'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload experimental debug APK (API hash is extractable from APK)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MANISHI_TELEGRAM_ARM64_EXPERIMENTAL_DEBUG
+          path: |
+            manishi-telegram-arm64-debug.apk
+            apk-sha256.txt
+          retention-days: 3
+          if-no-files-found: error
