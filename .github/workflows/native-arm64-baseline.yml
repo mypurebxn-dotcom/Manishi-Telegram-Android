@@ -1,0 +1,133 @@
+name: Native ARM64 baseline (upstream, unbranded)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-arm64-baseline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  upstream-arm64:
+    name: Build verified upstream native Android (not Manishi-branded)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      UPSTREAM_SHA: dc780e81ed1261c369c27870e8e0999a1eb0b600
+    steps:
+      - name: Check out workflow repository (NO personal source/credentials)
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@v3
+
+      - name: Install upstream-declared SDK, NDK and CMake
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install \
+            'platforms;android-36' \
+            'build-tools;36.0.0' \
+            'ndk;27.2.12479018' \
+            'cmake;3.22.1'
+          test -f "$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake"
+          test -f "$ANDROID_HOME/platforms/android-36/android.jar"
+          test -f "$ANDROID_HOME/cmake/3.22.1/bin/cmake"
+
+      - name: Fetch precisely pinned Telegram Android upstream and submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init upstream
+          cd upstream
+          git remote add origin https://github.com/TelegramOrg/Telegram-Android.git
+          git -c protocol.version=2 fetch --no-tags --depth=1 origin "$UPSTREAM_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"
+          git submodule sync --recursive
+          git submodule update --init --recursive --jobs 3 --depth 1
+          if test -n "$(git submodule status --recursive | grep -E '^[-+U]' || true)"; then
+            echo 'A submodule is not at its pinned commit' >&2
+            exit 1
+          fi
+
+      - name: Apply transparent ARM64-only CI filter (no local device patches)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          base = Path('upstream')
+          lib = base / 'TMessagesProj/build.gradle'
+          app = base / 'TMessagesProj_App/build.gradle'
+          a = lib.read_text()
+          anchor = '    defaultConfig {\n        minSdkVersion 21'
+          if a.count(anchor) != 1:
+              raise SystemExit('HOLD_LIBRARY_GRADLE_SOURCE_CHANGED')
+          lib.write_text(a.replace(anchor, "    defaultConfig {\n        ndk { abiFilters 'arm64-v8a' }\n        minSdkVersion 21", 1))
+          b = app.read_text()
+          needle = 'abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"'
+          if b.count(needle) != 3:
+              raise SystemExit('HOLD_APP_ABI_FLAVOR_SOURCE_CHANGED')
+          app.write_text(b.replace(needle, 'abiFilters "arm64-v8a"'))
+          print('CI_ONLY_ARM64_FILTER=PASS')
+          PY
+          cd upstream
+          git diff -- TMessagesProj/build.gradle TMessagesProj_App/build.gradle > ../ci-only-arm64.patch
+          test -s ../ci-only-arm64.patch
+
+      - name: Build unsigned-for-release upstream debug APK (not production-ready)
+        shell: bash
+        timeout-minutes: 240
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --max-workers=2 --no-parallel \
+            -Dorg.gradle.jvmargs='-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8' \
+            :TMessagesProj_App:assembleAfatDebug
+
+      - name: Verify APK signature, ZIP structure and ARM64 payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t apks < <(find upstream/TMessagesProj_App/build/outputs/apk -type f -name '*.apk' -print0)
+          if [[ ${#apks[@]} -ne 1 ]]; then
+            echo "HOLD_EXPECTED_ONE_APK_FOUND_${#apks[@]}" >&2
+            exit 1
+          fi
+          apk="${apks[0]}"
+          unzip -tq "$apk" >/dev/null
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$apk"
+          if ! unzip -Z1 "$apk" | grep -q '^lib/arm64-v8a/'; then
+            echo 'HOLD_NO_ARM64_NATIVE_LIBRARIES' >&2
+            exit 1
+          fi
+          if unzip -Z1 "$apk" | grep -E '^lib/(armeabi-v7a|x86|x86_64)/'; then
+            echo 'HOLD_NON_ARM64_LIBRARIES_IN_APK' >&2
+            exit 1
+          fi
+          sha256sum "$apk" | tee apk-sha256.txt
+          printf 'APK_BUILD=PASS_ARCHIVE_SIGNATURE_ARM64\nSTATUS=UNBRANDED_UPSTREAM_DEBUG_NOT_FINAL_MANISHI\n' >> "$GITHUB_STEP_SUMMARY"
+          cp "$apk" upstream-debug-arm64.apk
+
+      - name: Upload inspectable debug artifact (not a release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: UPSTREAM_DEBUG_ARM64_NOT_MANISHI_RELEASE
+          path: |
+            upstream-debug-arm64.apk
+            apk-sha256.txt
+            ci-only-arm64.patch
+          retention-days: 7
+          if-no-files-found: error
