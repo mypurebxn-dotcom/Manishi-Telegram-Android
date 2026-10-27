@@ -27,8 +27,15 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK command-line tools
-        uses: android-actions/setup-android@v3
+      - name: Use preinstalled Android SDK command-line tools (avoid deprecated tools package)
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${ANDROID_HOME:?GitHub runner ANDROID_HOME missing}"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER"
+          "$SDKMANAGER" --version
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
 
       - name: Install upstream-declared SDK, NDK and CMake
         shell: bash
