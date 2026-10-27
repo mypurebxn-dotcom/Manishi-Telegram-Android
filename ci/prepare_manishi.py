@@ -84,6 +84,9 @@ for n in (2, 3, 4, 5, 6):
         if s.count(old) != 1:
             sys.exit("HOLD_ALTERNATE_ICON_ANCHOR_DRIFT")
         s = s.replace(old, "@mipmap/manishi_launcher" + ("_round" if suffix.endswith("_round") else ""))
+# Use original Manishi artwork for remaining shortcut/intent icons.
+s = s.replace("@mipmap/ic_launcher_round", "@mipmap/manishi_launcher_round")
+s = s.replace("@mipmap/ic_launcher", "@mipmap/manishi_launcher")
 main.write_text(s, encoding="utf-8")
 
 res = root / "TMessagesProj/src/main/res"
