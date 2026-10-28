@@ -80,10 +80,12 @@ main = root / "TMessagesProj/src/main/AndroidManifest.xml"
 s = main.read_text(encoding="utf-8")
 for n in (2, 3, 4, 5, 6):
     for suffix in ("launcher", "launcher_round"):
-        old = f'@mipmap/icon_{n}_{suffix}'
+        # Match the entire quoted resource, not a prefix of *_round.
+        old = f'@mipmap/icon_{n}_{suffix}"'
         if s.count(old) != 1:
             sys.exit("HOLD_ALTERNATE_ICON_ANCHOR_DRIFT")
-        s = s.replace(old, "@mipmap/manishi_launcher" + ("_round" if suffix.endswith("_round") else ""))
+        new_icon = "@mipmap/manishi_launcher" + ("_round" if suffix.endswith("_round") else "") + '"'
+        s = s.replace(old, new_icon)
 # Use original Manishi artwork for remaining shortcut/intent icons.
 s = s.replace("@mipmap/ic_launcher_round", "@mipmap/manishi_launcher_round")
 s = s.replace("@mipmap/ic_launcher", "@mipmap/manishi_launcher")
