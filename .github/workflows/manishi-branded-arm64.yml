@@ -2,10 +2,6 @@ name: Manishi Telegram — branded ARM64 debug (credentials required)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'ci/manishi-native-chat-v1-build-once.flag'
 
 permissions:
   contents: read
